@@ -259,9 +259,6 @@ class AADSSO {
 						$this->settings,
 						$antiforgery_id
 					);
-
-					AADSSO::debug_log( json_encode( $jwt ) );
-
 				} catch ( Exception $e ) {
 					return new WP_Error(
 						'invalid_id_token',
@@ -315,18 +312,9 @@ class AADSSO {
 
 	function get_wp_user_from_aad_user( $jwt ) {
 
-		// Try to find an existing user in WP where the upn or unique_name of the current AAD user is
-		// (depending on config) the 'login' or 'email' field in WordPress
-		$unique_name = isset( $jwt->upn ) ? $jwt->upn : ( isset( $jwt->unique_name ) ? $jwt->unique_name : null );
-		if ( null === $unique_name ) {
-			return new WP_Error(
-					'unique_name_not_found',
-					__( 'ERROR: Neither \'upn\' nor \'unique_name\' claims not found in ID Token.',
-						'aad-sso-wordpress' )
-				);
-		}
-
-		$user = get_user_by( $this->settings->field_to_match_to_upn, $unique_name );
+		// Try to find an existing user in WP where the UPN of the current AAD user is
+		// (depending on config) the 'login' or 'email' field
+		$user = get_user_by( $this->settings->field_to_match_to_upn, $jwt->upn );
 
 		if ( ! is_a( $user, 'WP_User' ) ) {
 
@@ -338,18 +326,16 @@ class AADSSO {
 				// TODO: Is null better than a random password?
 				// TODO: Look for otherMail, or proxyAddresses before UPN for email
 				$userdata = array(
-					'user_email' => $unique_name,
-					'user_login' => $unique_name,
+					'user_email' => $jwt->upn,
+					'user_login' => $jwt->upn,
 					'first_name' => $jwt->given_name,
 					'last_name'	=> $jwt->family_name,
 					'user_pass'	=> null
 				);
 
 				$new_user_id = wp_insert_user( $userdata );
-				AADSSO::debug_log( 'Created new user: \'' . $unique_name . '\', user id ' . $new_user_id . '.' );
 
 				$user = new WP_User( $new_user_id );
-
 			} else {
 
 				// The user was authenticated, but not found in WP and auto-provisioning is disabled
@@ -388,19 +374,31 @@ class AADSSO {
 		// Determine which WordPress role the AAD group corresponds to.
 		// TODO: Check for error in the group membership response
 		$role_to_set = $this->settings->default_wp_role;
+		$has_role_access = false;
+        	$IntialRoleSet = false;
 		if ( ! empty( $group_memberships->value ) ) {
 			foreach ( $this->settings->aad_group_to_wp_role_map as $aad_group => $wp_role ) {
 				if ( in_array( $aad_group, $group_memberships->value ) ) {
 					$role_to_set = $wp_role;
-					break;
+
+					if ( null != $role_to_set || "" != $role_to_set ) {
+						// Set the role on the WordPress user
+                        if($IntialRoleSet)
+                        {
+                            $user->add_role( $role_to_set );    
+                        } else {
+                            $user->set_role( $role_to_set );
+                            $IntialRoleSet = true;    
+                        }
+                        
+						
+						$has_role_access = true;
+					}
 				}
 			}
 		}
 
-		if ( null != $role_to_set || "" != $role_to_set ) {
-			// Set the role on the WordPress user
-			$user->set_role( $role_to_set );
-		} else {
+		if ( ! $has_role_access ){
 			return new WP_Error(
 				'user_not_member_of_required_group',
 				sprintf(
@@ -528,12 +526,6 @@ class AADSSO {
 			$this->get_login_url(),
 			$this->get_logout_url()
 		);
-	}
-
-	public static function debug_log( $message ) {
-		if ( defined('AADSSO_DEBUG') && true === AADSSO_DEBUG ) {
-			error_log( 'AADSSO: ' . $message );
-		}
 	}
 }
 
